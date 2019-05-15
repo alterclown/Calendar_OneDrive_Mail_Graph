@@ -1,27 +1,213 @@
-﻿using Owin;
+﻿using Calendar_OneDrive_Mail_Graph.Models;
+using Microsoft.Identity.Client;
+using Microsoft.Owin;
+using Owin;
 using System;
 using System.Collections.Generic;
+using System.IdentityModel.Claims;
+using System.IO;
 using System.Linq;
+using System.Runtime.Serialization.Formatters.Binary;
+using System.Security.Claims;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Web;
+using System.Web.Mvc;
 
 namespace Calendar_OneDrive_Mail_Graph.Utils
 {
-    public class OAuth2CodeRedeemerMiddleWare
+    /// <summary>
+    /// A simple custom middleware, which takes care of intercepting messages containing authorization codes, validating them, redeeming the code 
+    /// and saving the resulting tokens in a MSAL cache, and finally redirecting to the URL that originated the request.
+    /// </summary>
+    /// <seealso cref="Microsoft.Owin.OwinMiddleware" />
+
+    public sealed class OAuth2CodeRedeemerMiddleWare : OwinMiddleware
     {
+        private readonly OAuth2CodeRedeemerOptions options;
+        public OAuth2CodeRedeemerMiddleWare(OwinMiddleware next, OAuth2CodeRedeemerOptions options) : base(next)
+        {
+            if (options == null)
+            {
+                throw new ArgumentNullException("options");
+
+            }
+            this.options = options;
+        }
+
+        public override async Task Invoke(IOwinContext context)
+        {
+            string code = context.Request.Query["code"];
+            if (code != null)
+            {
+                //extract state
+                string state = HttpUtility.UrlDecode(context.Request.Query["state"]);
+                string session_state = context.Request.Query["session_state"];
+
+                string signedInUserID = context.Authentication.User.FindFirst(System.IdentityModel.Claims.ClaimTypes.NameIdentifier).Value;
+                HttpContextBase hcb = context.Environment["System.Web.HttpContextBase"] as HttpContextBase;
+                TokenCache userTokenCache = new MSALSessionCache(signedInUserID, hcb).GetMsalCacheInstance();
+                ConfidentialClientApplication cca = new ConfidentialClientApplication(options.ClientId, options.RedirectUri, new ClientCredential(options.ClientSecret), userTokenCache, null);
+
+                //validate state
+
+                CodeRedemptionData crd = OAuth2RequestManager.ValidateState(state, hcb);
+
+                if (crd != null)
+                {
+                    //If Valid redeem code
+
+                    try
+                    {
+                        AuthenticationResult result = await cca.AcquireTokenByAuthorizationCodeAsync(code, crd.Scopes);
+                    }
+                    catch (Exception ex)
+                    {
+                        context.Response.Write(ex.Message);
+
+                    }
+
+                    //redirect to original requestor
+
+                    context.Response.StatusCode = 302;
+                    context.Response.Set("Location", crd.RequestOriginatorUrl);
+                }
+                else
+                {
+                    context.Response.StatusCode = 302;
+                    context.Response.Set("Location", "/Error?message" + "code_redeem_failed");
+
+                }
+            }
+            else
+                await this.Next.Invoke(context);
+        }
     }
-    public sealed class OAuth2CodeRedeemerOptions
-    {
+
+    public sealed class OAuth2CodeRedeemerOptions {
         public string ClientId { get; set; }
         public string RedirectUri { get; set; }
         public string ClientSecret { get; set; }
     }
-
     internal static class OAuth2CodeRedeemerHandler
     {
         public static IAppBuilder UseOAuth2CodeRedeemer(this IAppBuilder app, OAuth2CodeRedeemerOptions options)
         {
-            app.Use<OAuth2CodeRedeemerMiddleware>(options);
+            app.Use<OAuth2CodeRedeemerMiddleWare>(options);
             return app;
+
         }
     }
+
+    public class OAuth2RequestManager
+    {
+        private static ReaderWriterLockSlim SessionLock = new ReaderWriterLockSlim(LockRecursionPolicy.NoRecursion);
+        /// Generate a state value using a random Guid value, the origin of the request and the scopes being requested.
+        /// The state value will be consumed by the OAuth controller for validation, for specifying the corresc scopes during code redemption, 
+        /// and redirection after code redemption.
+        /// Here we store the random Guid in the session for validation by the OAuth controller.
+        private static string GenerateState(string requestUrl, HttpContextBase httpcontext, UrlHelper url, string[] scopes)
+        {
+            try
+            {
+                string stateGuid = Guid.NewGuid().ToString();
+                SaveUserStateValue(stateGuid, httpcontext);
+                List<string> stateList = new List<string>();
+                stateList.Add(stateGuid);
+                stateList.Add(requestUrl);
+
+                // turn the scopes array into a comma separated list string
+
+                string scopesList = scopes[0];
+                if (scopes.Count() > 1)
+                    for (int i=1; i<scopes.Count();i++)
+                {
+                        scopesList += " , " + scopes[i];
+                }
+
+                stateList.Add(scopesList);
+                var formatter = new BinaryFormatter();
+                var stream = new MemoryStream();
+                formatter.Serialize(stream, stateList);
+                var stateBits = stream.ToArray();
+                return url.Encode(Convert.ToBase64String(stateBits));
+            }
+            catch
+            {
+                return null;
+            }
+        }
+        // save the state in the session for the current user
+
+        private static void SaveUserStateValue(string stateGuid, HttpContextBase httpcontext)
+        {
+            string signedInUserID = ClaimsPrincipal.Current.FindFirst(System.IdentityModel.Claims.ClaimTypes.NameIdentifier).Value;
+            SessionLock.EnterWriteLock();
+            httpcontext.Session[signedInUserID + "_state"] = stateGuid;
+            SessionLock.ExitWriteLock();
+        }
+
+        private static string ReadUserStateValue(HttpContextBase httpcontext)
+        {
+            string signedInUserId = ClaimsPrincipal.Current.FindFirst(System.IdentityModel.Claims.ClaimTypes.NameIdentifier).Value;
+            string stateGuid = string.Empty;
+            SessionLock.EnterReadLock();
+            stateGuid = (string)httpcontext.Session[signedInUserId + "_state"];
+            SessionLock.ExitReadLock();
+            return stateGuid;
+        }
+        public static CodeRedemptionData ValidateState(string state, HttpContextBase httpcontext)
+        {
+            try
+            {
+                var stateBits = Convert.FromBase64String(HttpUtility.UrlDecode(state));
+                var formatter = new BinaryFormatter();
+                var stream = new MemoryStream(stateBits);
+                List<string> stateList = (List<string>)formatter.Deserialize(stream);
+                var stateGuid = stateList[0];
+                //TODO - cleaning up should not be necessary, I have just one entry per user
+                // but at least I should do it for making the state single use
+
+                if (stateGuid == ReadUserStateValue(httpcontext))
+                {
+                    string returnURL = stateList[1];
+                    string[] scopes = stateList[2].Split(',');
+                    return new CodeRedemptionData()
+                    {
+                        RequestOriginatorUrl = returnURL,
+                        Scopes = scopes
+                    };
+                }
+                else
+                    return null;
+            }
+            catch {
+                return null;
+            }
+        }
+
+        public static async Task<string> GenerateAuthorizationRequestUrl(string[] scopes, ConfidentialClientApplication cca, HttpContextBase httpcontext, UrlHelper url)
+        {
+            string signedInUserID = ClaimsPrincipal.Current.FindFirst(System.IdentityModel.Claims.ClaimTypes.NameIdentifier).Value;
+            string preferredUserName = ClaimsPrincipal.Current.FindFirst("preferred_name").Value;
+            Uri oauthCodeProcessingPath = new Uri(httpcontext.Request.Url.GetLeftPart(UriPartial.Authority).ToString());
+            string state = GenerateState(httpcontext.Request.Url.ToString(), httpcontext, url, scopes);
+            string tenantID = ClaimsPrincipal.Current.FindFirst("http://schemas.microsoft.com/identity/claims/tenantid").Value;
+
+
+            // 9188040d-6c67-4c5b-b112-36a304b66dad is the GUID that indicates that the user is a consumer user from a Microsoft account. All personal account will have this tenant id.
+
+            string domain_hint = (tenantID == "9188040d-6c67-4c5b-b112-36a304b66dad") ? "customers" : "organizations";
+            Uri authzMessageUri = await cca.GetAuthorizationRequestUrlAsync(scopes,oauthCodeProcessingPath.ToString(),preferredUserName,state==null?null: "&state" +state + "&domain_hint" +domain_hint,null,cca.Authority);
+
+            return authzMessageUri.ToString();
+        }
+
+    }
+    public class CodeRedemptionData
+    {
+        public string RequestOriginatorUrl { get; set; }
+        public string[] Scopes { get; set; }
+    }
 }
+
