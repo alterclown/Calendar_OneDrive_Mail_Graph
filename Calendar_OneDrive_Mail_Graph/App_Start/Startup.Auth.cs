@@ -65,12 +65,7 @@ namespace Calendar_OneDrive_Mail_Graph.App_Start
                     //        //    throw new SecurityTokenInvalidIssuerException("Invalid issuer");
                     //    },
                 },
-                Notifications = new OpenIdConnectAuthenticationNotifications
-                {
-                    AuthorizationCodeReceived = OnAuthorization,
-                    AuthenticationFailed = OnAuthenticationFailed
-                }
-
+                Notifications = new OpenIdConnectAuthenticationNotifications {AuthorizationCodeReceived = OnAuthorization, AuthenticationFailed = OnAuthenticationFailed}
             });
         }
 

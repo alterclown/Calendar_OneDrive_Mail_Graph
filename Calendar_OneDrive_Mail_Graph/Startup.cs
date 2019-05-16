@@ -7,12 +7,10 @@ using Owin;
 
 namespace Calendar_OneDrive_Mail_Graph
 {
-    public partial class Startup
+    partial class Startup
     {
         public void Configuration(IAppBuilder app)
         {
-            // For more information on how to configure your application, visit https://go.microsoft.com/fwlink/?LinkID=316888
-
             ConfigureAuth(app);
         }
     }
