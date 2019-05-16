@@ -111,8 +111,7 @@ namespace Calendar_OneDrive_Mail_Graph.Controllers
 
             HttpClient client = new HttpClient();
             HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Post, "https://graph.microsoft.com/v1.0/me/microsoft.graph.sendMail");
-            request.Content = new StringContent(message,Encoding.UTF8);
-
+            request.Content = new StringContent(message, Encoding.UTF8, "application/json");
             // try to get token silently
 
             string signedInUserID = ClaimsPrincipal.Current.FindFirst(ClaimTypes.NameIdentifier).Value;

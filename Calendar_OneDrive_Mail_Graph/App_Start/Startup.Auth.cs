@@ -16,7 +16,7 @@ using Calendar_OneDrive_Mail_Graph.Models;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 
-namespace Calendar_OneDrive_Mail_Graph.App_Start
+namespace Calendar_OneDrive_Mail_Graph
 {
     public partial class Startup
     {

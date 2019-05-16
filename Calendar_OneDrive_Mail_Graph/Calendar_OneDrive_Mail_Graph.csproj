@@ -279,6 +279,7 @@
     <Content Include="Views\Home\ReadMail.cshtml" />
     <Content Include="Views\Home\SendMail.cshtml" />
     <Content Include="Views\Shared\_LoginPartial.cshtml" />
+    <Content Include="Views\Home\Calendar.cshtml" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="App_Data\" />
